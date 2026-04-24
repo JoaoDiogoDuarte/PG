@@ -1,4 +1,16 @@
-# Proof General — Organize your proofs! 
+# Proof General — Organize your proofs!
+
+> **Fork notice:** This fork ([JoaoDiogoDuarte/PG](https://github.com/JoaoDiogoDuarte/PG))
+> contains additions on top of upstream [ProofGeneral/PG](https://github.com/ProofGeneral/PG).
+> **All additions in this fork (code, tests, and commit messages) are AI-generated**
+> (produced with Claude Code) and have not been reviewed or accepted by the
+> upstream Proof General maintainers. Use at your own risk.
+>
+> Current additions:
+> - `easycrypt/easycrypt-folding.el` — section code folding for EasyCrypt mode
+>   (`pg-ec-toggle-hiding`, bound to `C-c w`).
+> - `easycrypt/tests/folding-basic.ec`, `easycrypt/tests/folding-errors.ec` —
+>   manual test files for the folding feature.
 
 [![CI](https://github.com/ProofGeneral/PG/workflows/CI/badge.svg?branch=master)](https://github.com/ProofGeneral/PG/actions?query=workflow%3ACI)
 [![MELPA](https://melpa.org/packages/proof-general-badge.svg)](https://melpa.org/#/proof-general)

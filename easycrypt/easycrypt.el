@@ -15,6 +15,7 @@
 (require 'easycrypt-syntax)
 (require 'easycrypt-hooks)
 (require 'easycrypt-abbrev)
+(require 'easycrypt-folding)
 
 ;;; Code:
 
