@@ -197,7 +197,9 @@ unfold that exact section.  Otherwise operate on the innermost
 well-formed section containing point.  Signals a user-visible error if
 the buffer's section structure is malformed."
   (interactive)
-  (let ((existing (pg-ec--folded-overlay-at (point))))
+  (let ((existing (or (pg-ec--folded-overlay-at (point))
+                      (pg-ec--folded-overlay-at (line-end-position))
+                      (pg-ec--folded-overlay-at (line-beginning-position)))))
     (if existing
         (progn
           (pg-ec--unfold-overlay existing)
@@ -208,13 +210,16 @@ the buffer's section structure is malformed."
                  (footer (cdr pair))
                  (name   (nth 1 header))
                  (beg    (nth 4 header))
-                 (end    (nth 3 footer)))
-            (let ((dup (pg-ec--overlay-in-region beg end)))
-              (when dup (pg-ec--unfold-overlay dup)))
-            (pg-ec--make-fold-overlay beg end name)
-            (goto-char (nth 2 header))
-            (message "EasyCrypt section%s folded"
-                     (if name (concat " " name) "")))
+                 (end    (nth 3 footer))
+                 (dup    (pg-ec--overlay-in-region beg end)))
+            (if dup
+                (progn
+                  (pg-ec--unfold-overlay dup)
+                  (message "EasyCrypt section unfolded"))
+              (pg-ec--make-fold-overlay beg end name)
+              (goto-char (nth 2 header))
+              (message "EasyCrypt section%s folded"
+                       (if name (concat " " name) ""))))
         (error
          (user-error "pg-ec-toggle-hiding: %s" (error-message-string err)))))))
 
