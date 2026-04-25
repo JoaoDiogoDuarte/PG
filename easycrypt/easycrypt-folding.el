@@ -735,9 +735,44 @@ is non-nil."
       (when (and folds (not advised))
         (princ "\nWARNING: advice not installed; folded proofs won't be omitted.\n")))))
 
-;; --------------------------------------------------------------------
-;; Mode integration
-;; --------------------------------------------------------------------
+;;;###autoload
+(defun pg-ec-folding-debug-omission ()
+  "Per-proof report of whether the omit gate would skip the body."
+  (interactive)
+  (let ((regions (pg-ec--scan-regions))
+        rows)
+    (dolist (r regions)
+      (when (memq (pg-ec--r-kind r)
+                  '(lemma equiv hoare ehoare phoare realize))
+        (let* ((stmt-end (pg-ec--find-statement-end (pg-ec--r-beg r)))
+               (probe (or stmt-end (pg-ec--r-hend r)))
+               (in-fold (pg-ec--position-in-fold-p probe))
+               (covering
+                (cl-remove-if-not
+                 (lambda (ov) (overlay-get ov 'pg-ec-fold))
+                 (overlays-at probe))))
+          (push (list (line-number-at-pos (pg-ec--r-beg r))
+                      (symbol-name (pg-ec--r-kind r))
+                      (or (pg-ec--r-name r) "<anon>")
+                      in-fold
+                      (mapcar (lambda (ov)
+                                (format "%s:%d-%d"
+                                        (or (overlay-get ov 'pg-ec-name)
+                                            (symbol-name
+                                             (overlay-get ov 'pg-ec-kind)))
+                                        (line-number-at-pos (overlay-start ov))
+                                        (line-number-at-pos (overlay-end ov))))
+                              covering))
+                rows))))
+    (with-output-to-temp-buffer "*pg-ec-omission*"
+      (princ "Per-proof omission decisions (probe = end of lemma statement):\n\n")
+      (princ (format "%-6s %-8s %-30s %-6s %s\n"
+                     "line" "kind" "name" "omit?" "covering folds"))
+      (dolist (row (nreverse rows))
+        (princ (format "%-6d %-8s %-30s %-6s %s\n"
+                       (nth 0 row) (nth 1 row) (nth 2 row)
+                       (if (nth 3 row) "YES" "no")
+                       (or (mapconcat #'identity (nth 4 row) ", ") "-")))))))
 
 (with-eval-after-load 'easycrypt
   (when (boundp 'easycrypt-mode-map)

@@ -106,10 +106,15 @@ this list are strings."
   ;; Omit-proofs configuration (see `proof-omit-proofs-configured').
   ;; The folding layer (easycrypt-folding.el) selectively activates
   ;; this for proofs whose lemma is inside a `pg-ec-fold' overlay.
-  ;; Match the keyword as a whole symbol anywhere in the command string,
-  ;; tolerating leading whitespace and comments that PG carries in `cmd'.
-  (setq  proof-script-proof-start-regexp       "\\_<proof\\_>"
-         proof-script-proof-end-regexp         "\\_<\\(qed\\|save\\|admitted\\|abort\\)\\_>"
+  ;; Anchor proof-start at the lemma-introducing keyword (`proof.' is
+  ;; optional in EC, so anchoring on it would miss bodies that omit it).
+  ;; The omit framework rewrites the body+closer into `admitted.';
+  ;; everything from the end of the lemma command up to the end of
+  ;; `qed.' / `admitted.' / `abort.' is replaced.
+  (setq  proof-script-proof-start-regexp
+         "\\_<\\(lemma\\|equiv\\|hoare\\|ehoare\\|phoare\\|realize\\)\\_>"
+         proof-script-proof-end-regexp
+         "\\_<\\(qed\\|save\\|admitted\\|abort\\)\\_>"
          proof-script-definition-end-regexp    "\\_<abort\\_>"
          proof-script-proof-admit-command      "admitted."
          proof-omit-cheating-regexp            "\\_<\\(admitted\\|abort\\)\\_>"
