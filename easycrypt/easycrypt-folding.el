@@ -384,10 +384,22 @@ from being registered."
                    (< (pg-ec--region-size a) (pg-ec--region-size b))))))))
 
 (defun pg-ec--region-at-point-or-line (regions)
-  "Find innermost region containing point, end-of-line, or beginning-of-line."
-  (or (pg-ec--innermost-region-at (point) regions)
-      (pg-ec--innermost-region-at (line-end-position) regions)
-      (pg-ec--innermost-region-at (line-beginning-position) regions)))
+  "Find the smallest region containing point, end-of-line, or
+beginning-of-line.  Considering all three probe positions and picking
+the smallest match means that when point is on a header line but
+column-wise before the keyword (e.g. inside the leading indent or on
+`local'), the lemma still wins over its enclosing section."
+  (let ((cands (delete-dups
+                (delq nil
+                      (list (pg-ec--innermost-region-at (point) regions)
+                            (pg-ec--innermost-region-at
+                             (line-end-position) regions)
+                            (pg-ec--innermost-region-at
+                             (line-beginning-position) regions))))))
+    (when cands
+      (car (sort cands
+                 (lambda (a b)
+                   (< (pg-ec--region-size a) (pg-ec--region-size b))))))))
 
 ;; --------------------------------------------------------------------
 ;; Overlays
