@@ -610,13 +610,69 @@ invocation anywhere on a folded region's header line unfolds it."
     (add-hook 'kill-buffer-hook #'pg-ec-folding-save-state nil t)))
 
 ;; --------------------------------------------------------------------
+;; Send `admitted.' for folded proofs (selective omit-proofs)
+;; --------------------------------------------------------------------
+;;
+;; Proof General's omit-proofs framework (proof-script.el:2190) already
+;; rewrites a 'proof chunk's last span to `proof-script-proof-admit-
+;; command'.  We hook `proof-script-omit-filter' so the chunk
+;; classification depends on fold state: a 'proof chunk whose
+;; `proof-start-span-end' lies inside a `pg-ec-fold' overlay stays a
+;; 'proof chunk (and is therefore omitted); otherwise it is demoted to
+;; 'no-proof, which makes the framework leave it untouched.
+;;
+;; This affects only easycrypt-mode buffers and is a no-op when nothing
+;; is folded.
+
+(defcustom pg-ec-folding-omit-proofs t
+  "If non-nil, send `admitted.' to EasyCrypt for proofs that lie
+inside a `pg-ec-fold' overlay.  Unfolded proofs are unaffected."
+  :type 'boolean :group 'pg-ec-folding)
+
+(defun pg-ec--position-in-fold-p (pos)
+  "Non-nil if POS is covered by a `pg-ec-fold' overlay."
+  (and (integer-or-marker-p pos)
+       (cl-some (lambda (ov) (overlay-get ov 'pg-ec-fold))
+                (overlays-at pos))))
+
+(defun pg-ec--omit-filter-gate (chunks)
+  "Demote `proof' chunks whose lemma is not inside a fold to `no-proof'.
+Run as `:filter-return' advice on `proof-script-omit-filter'.
+Active only in `easycrypt-mode' buffers when `pg-ec-folding-omit-proofs'
+is non-nil."
+  (if (and pg-ec-folding-omit-proofs
+           (derived-mode-p 'easycrypt-mode))
+      (mapcar
+       (lambda (chunk)
+         (cond
+          ((eq (car chunk) 'proof)
+           ;; chunk = ('proof cmds-rev start-span-start start-span-end)
+           (let ((proof-start-end (nth 3 chunk)))
+             (if (pg-ec--position-in-fold-p proof-start-end)
+                 chunk
+               (list 'no-proof (nth 1 chunk)))))
+          (t chunk)))
+       chunks)
+    chunks))
+
+(with-eval-after-load 'proof-script
+  (advice-add 'proof-script-omit-filter
+              :filter-return #'pg-ec--omit-filter-gate))
+
+(defun pg-ec-folding--enable-omit ()
+  "Buffer-local: keep `proof-omit-proofs-option' on so the gate runs."
+  (when pg-ec-folding-omit-proofs
+    (setq-local proof-omit-proofs-option t)))
+
+;; --------------------------------------------------------------------
 ;; Mode integration
 ;; --------------------------------------------------------------------
 
 (with-eval-after-load 'easycrypt
   (when (boundp 'easycrypt-mode-map)
     (define-key easycrypt-mode-map (kbd "C-c w") #'pg-ec-toggle-hiding))
-  (add-hook 'easycrypt-mode-hook #'pg-ec-folding--setup))
+  (add-hook 'easycrypt-mode-hook #'pg-ec-folding--setup)
+  (add-hook 'easycrypt-mode-hook #'pg-ec-folding--enable-omit))
 
 (provide 'easycrypt-folding)
 

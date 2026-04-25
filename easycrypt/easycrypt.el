@@ -102,6 +102,16 @@ this list are strings."
 
   (setq  proof-goal-command                    "lemma %s: ."
          proof-save-command                    "qed.")
+
+  ;; Omit-proofs configuration (see `proof-omit-proofs-configured').
+  ;; The folding layer (easycrypt-folding.el) selectively activates
+  ;; this for proofs whose lemma is inside a `pg-ec-fold' overlay.
+  (setq  proof-script-proof-start-regexp       "\\`proof\\b"
+         proof-script-proof-end-regexp         "\\`\\(qed\\|save\\|admitted\\|abort\\)\\b"
+         proof-script-definition-end-regexp    "\\`abort\\b"
+         proof-script-proof-admit-command      "admitted."
+         proof-omit-cheating-regexp            "\\`\\(admitted\\|abort\\)\\b"
+         proof-omit-proofs-configured          t)
   
   (setq  proof-prog-name                       easycrypt-prog-name
          proof-assistant-home-page             easycrypt-web-page)
