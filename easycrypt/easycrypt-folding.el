@@ -186,7 +186,12 @@ Returns nil if none is found."
            ((eq c ?\}) (setq brace (max 0 (1- brace))) (forward-char 1))
            ((and (memq c '(?: ?=))
                  (= paren 0) (= brack 0) (= brace 0))
-            (setq found (point)))
+            (cond
+             ;; `<:' digraph (module-of-type): body starts AFTER it.
+             ((and (eq c ?:) (eq (char-before) ?<))
+              (forward-char 1)
+              (setq found (point)))
+             (t (setq found (point)))))
            (t (forward-char 1)))))
       found)))
 
