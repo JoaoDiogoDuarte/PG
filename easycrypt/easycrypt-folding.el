@@ -53,16 +53,17 @@
 (defconst pg-ec--id "[A-Za-z_][A-Za-z0-9_']*")
 
 (defconst pg-ec--re-theory-open
-  (concat "^[ \t]*theory[ \t]+\\(" pg-ec--id "\\)[ \t]*\\."))
+  (concat "\\_<theory\\_>[ \t]+\\(" pg-ec--id "\\)[ \t]*\\."))
 
 (defconst pg-ec--re-section-open
-  (concat "^[ \t]*section\\(?:[ \t]+\\(" pg-ec--id "\\)\\)?[ \t]*\\."))
+  (concat "\\_<section\\_>\\(?:[ \t]+\\(" pg-ec--id "\\)\\)?[ \t]*\\."))
 
 (defconst pg-ec--re-section-close
-  (concat "^[ \t]*end[ \t]+section\\(?:[ \t]+\\(" pg-ec--id "\\)\\)?[ \t]*\\."))
+  (concat "\\_<end\\_>[ \t]+\\_<section\\_>"
+          "\\(?:[ \t]+\\(" pg-ec--id "\\)\\)?[ \t]*\\."))
 
 (defconst pg-ec--re-theory-close
-  (concat "^[ \t]*end[ \t]+\\(" pg-ec--id "\\)[ \t]*\\."))
+  (concat "\\_<end\\_>[ \t]+\\(" pg-ec--id "\\)[ \t]*\\."))
 
 (defconst pg-ec--re-proof-start
   "\\_<\\(lemma\\|equiv\\|hoare\\|ehoare\\|phoare\\)\\_>")
@@ -273,9 +274,10 @@ from being registered."
             (let ((end (pg-ec--skip-comment mb)))
               (if end
                   (progn
-                    (push (pg-ec--region 'comment nil mb
-                                         (pg-ec--header-end-at mb) end)
-                          regions)
+                    ;; Fold the whole comment in place: header-end == :beg
+                    ;; so the overlay's `display' replaces the entire
+                    ;; `(*...*)' span with the marker (also `(*...*)').
+                    (push (pg-ec--region 'comment nil mb mb end) regions)
                     (goto-char end))
                 (goto-char (point-max)))))
            ((pg-ec--in-comment-or-string-p mb)
@@ -422,31 +424,34 @@ column-wise before the keyword (e.g. inside the leading indent or on
       (user-error "Cannot edit folded EasyCrypt region (use C-c w to unfold)"))))
 
 (defun pg-ec--label (kind name)
-  (let ((k (symbol-name kind)))
-    (format "[%s%s folded ...]" k (if name (concat " " name) ""))))
+  (cond
+   ((eq kind 'comment) "(*...*)")
+   (t (format "[%s%s folded ...]"
+              (symbol-name kind)
+              (if name (concat " " name) "")))))
 
 (defun pg-ec--make-fold-overlay (beg end kind name)
-  (let ((ov (make-overlay beg end nil t nil))
-        (label (pg-ec--label kind name)))
-    (overlay-put ov 'pg-ec-fold t)
-    (overlay-put ov 'pg-ec-kind kind)
-    (overlay-put ov 'pg-ec-name name)
-    (overlay-put ov 'invisible 'pg-ec-fold)
-    (overlay-put ov 'isearch-open-invisible
-                 (lambda (o) (pg-ec--unfold-overlay o)))
-    (overlay-put ov 'before-string
-                 (propertize (concat " " label " ") 'face 'pg-ec-folded-face))
-    (overlay-put ov 'display
-                 (propertize (concat " " label) 'face 'pg-ec-folded-face))
-    (overlay-put ov 'evaporate t)
-    (overlay-put ov 'modification-hooks    '(pg-ec--modification-guard))
-    (overlay-put ov 'insert-in-front-hooks '(pg-ec--modification-guard))
-    (overlay-put ov 'insert-behind-hooks   '(pg-ec--modification-guard))
-    (overlay-put ov 'help-echo
-                 (format "Folded EasyCrypt %s. C-c w to unfold." label))
-    (when (memq kind '(section theory))
-      (add-hook 'after-change-functions #'pg-ec--after-change nil t))
-    ov))
+  "Create a fold overlay or return nil if the range is empty."
+  (when (< beg end)
+    (let ((ov (make-overlay beg end nil t nil))
+          (label (pg-ec--label kind name)))
+      (overlay-put ov 'pg-ec-fold t)
+      (overlay-put ov 'pg-ec-kind kind)
+      (overlay-put ov 'pg-ec-name name)
+      (overlay-put ov 'invisible 'pg-ec-fold)
+      (overlay-put ov 'isearch-open-invisible
+                   (lambda (o) (pg-ec--unfold-overlay o)))
+      (overlay-put ov 'display
+                   (propertize label 'face 'pg-ec-folded-face))
+      (overlay-put ov 'evaporate t)
+      (overlay-put ov 'modification-hooks    '(pg-ec--modification-guard))
+      (overlay-put ov 'insert-in-front-hooks '(pg-ec--modification-guard))
+      (overlay-put ov 'insert-behind-hooks   '(pg-ec--modification-guard))
+      (overlay-put ov 'help-echo
+                   (format "Folded EasyCrypt %s. C-c w to unfold." label))
+      (when (memq kind '(section theory))
+        (add-hook 'after-change-functions #'pg-ec--after-change nil t))
+      ov)))
 
 (defun pg-ec--unfold-overlay (ov)
   (overlay-put ov 'pg-ec-unfolding t)
@@ -560,44 +565,108 @@ update the overlay labels and rewrite the matching closer."
 ;; Command
 ;; --------------------------------------------------------------------
 
+(defun pg-ec--regions-fully-inside (regions beg end)
+  "REGIONS whose [:beg, :end) lies inside [BEG, END)."
+  (cl-remove-if-not
+   (lambda (r) (and (>= (pg-ec--r-beg r) beg)
+                    (<= (pg-ec--r-end r) end)))
+   regions))
+
+(defun pg-ec--topmost-regions (regions)
+  "Filter REGIONS to those not strictly contained in another in REGIONS."
+  (cl-remove-if
+   (lambda (r)
+     (cl-some (lambda (s)
+                (and (not (eq r s))
+                     (<= (pg-ec--r-beg s) (pg-ec--r-beg r))
+                     (>= (pg-ec--r-end s) (pg-ec--r-end r))
+                     (or (< (pg-ec--r-beg s) (pg-ec--r-beg r))
+                         (> (pg-ec--r-end s) (pg-ec--r-end r)))))
+              regions))
+   regions))
+
+(defun pg-ec--toggle-region (beg end)
+  "Bulk fold/unfold every foldable EasyCrypt region inside [BEG, END).
+If any fold overlay already exists in the range, unfold all of them.
+Otherwise fold every topmost region whose extent fits inside [BEG, END)."
+  (let ((existing (cl-remove-if-not
+                   (lambda (ov) (overlay-get ov 'pg-ec-fold))
+                   (overlays-in beg end))))
+    (cond
+     (existing
+      (mapc #'pg-ec--unfold-overlay existing)
+      (message "Unfolded %d region(s)" (length existing)))
+     (t
+      (let* ((regions (pg-ec--scan-regions))
+             (inside  (pg-ec--regions-fully-inside regions beg end))
+             (top     (pg-ec--topmost-regions inside))
+             (n 0))
+        (dolist (r top)
+          (let ((ov-beg (pg-ec--r-hend r))
+                (ov-end (pg-ec--r-end r)))
+            (unless (pg-ec--fold-overlay-starting-at ov-beg)
+              (pg-ec--make-fold-overlay ov-beg ov-end
+                                        (pg-ec--r-kind r)
+                                        (pg-ec--r-name r))
+              (setq n (1+ n)))))
+        (if (zerop n)
+            (user-error "No foldable EasyCrypt region inside selection")
+          (message "Folded %d region(s)" n)))))))
+
 ;;;###autoload
 (defun pg-ec-toggle-hiding ()
-  "Toggle folding of the innermost EasyCrypt region at point.
-Foldable regions are theories, sections, proofs (lemma/equiv/hoare/
-ehoare/phoare), axioms, ops, consts, clones, and comments.  A second
-invocation anywhere on a folded region's header line unfolds it."
+  "Toggle folding of EasyCrypt regions.
+
+If the region is active, bulk-toggle: unfold every fold overlay inside
+the selection if any exists, otherwise fold every topmost region whose
+extent lies inside the selection.
+
+Otherwise, toggle the innermost region at point.  Foldable regions are
+theories, sections, proofs (lemma/equiv/hoare/ehoare/phoare), axioms,
+ops, consts, clones, modules, and comments."
   (interactive)
-  (let ((existing (or (pg-ec--folded-overlay-at (point))
-                      (pg-ec--folded-overlay-at (line-end-position))
-                      (pg-ec--folded-overlay-at (line-beginning-position)))))
-    (if existing
-        (progn
-          (pg-ec--unfold-overlay existing)
-          (message "EasyCrypt region unfolded"))
-      (condition-case err
+  (cond
+   ((use-region-p)
+    (let ((beg (region-beginning))
+          (end (region-end)))
+      (pg-ec--toggle-region beg end)
+      (when pg-ec-folding-persist (pg-ec-folding-save-state))
+      (deactivate-mark)))
+   (t
+    (let ((existing (or (pg-ec--folded-overlay-at (point))
+                        (pg-ec--folded-overlay-at (line-end-position))
+                        (pg-ec--folded-overlay-at (line-beginning-position)))))
+      (if existing
           (progn
-            (let* ((regions (pg-ec--scan-regions))
-                   (r (pg-ec--region-at-point-or-line regions)))
-              (unless r
-                (user-error "No foldable EasyCrypt region at point"))
-              (let* ((ov-beg (pg-ec--r-hend r))
-                     (ov-end (pg-ec--r-end r))
-                     (dup (pg-ec--fold-overlay-starting-at ov-beg)))
-                (if dup
-                    (progn
-                      (pg-ec--unfold-overlay dup)
-                      (message "EasyCrypt region unfolded"))
-                  (pg-ec--make-fold-overlay ov-beg ov-end
-                                            (pg-ec--r-kind r)
-                                            (pg-ec--r-name r))
-                  (goto-char (pg-ec--r-beg r))
-                  (message "EasyCrypt %s folded"
-                           (pg-ec--label (pg-ec--r-kind r)
-                                         (pg-ec--r-name r))))))
-            (when pg-ec-folding-persist
-              (pg-ec-folding-save-state)))
-        (error
-         (user-error "pg-ec-toggle-hiding: %s" (error-message-string err)))))))
+            (pg-ec--unfold-overlay existing)
+            (message "EasyCrypt region unfolded"))
+        (condition-case err
+            (progn
+              (let* ((regions (pg-ec--scan-regions))
+                     (r (pg-ec--region-at-point-or-line regions)))
+                (unless r
+                  (user-error "No foldable EasyCrypt region at point"))
+                (let* ((ov-beg (pg-ec--r-hend r))
+                       (ov-end (pg-ec--r-end r))
+                       (dup (pg-ec--fold-overlay-starting-at ov-beg)))
+                  (if dup
+                      (progn
+                        (pg-ec--unfold-overlay dup)
+                        (message "EasyCrypt region unfolded"))
+                    (let ((ov (pg-ec--make-fold-overlay
+                               ov-beg ov-end
+                               (pg-ec--r-kind r) (pg-ec--r-name r))))
+                      (if (null ov)
+                          (user-error "Region too small to fold")
+                        (goto-char (pg-ec--r-beg r))
+                        (message "EasyCrypt %s folded"
+                                 (pg-ec--label (pg-ec--r-kind r)
+                                               (pg-ec--r-name r))))))))
+              (when pg-ec-folding-persist
+                (pg-ec-folding-save-state)))
+          (error
+           (user-error "pg-ec-toggle-hiding: %s"
+                       (error-message-string err)))))))))
 
 ;; --------------------------------------------------------------------
 ;; Persistence (sidecar state files)
