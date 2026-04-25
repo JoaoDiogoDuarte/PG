@@ -695,8 +695,27 @@ invocation anywhere on a folded region's header line unfolds it."
        (cl-some (lambda (ov) (overlay-get ov 'pg-ec-fold))
                 (overlays-at pos))))
 
+(defun pg-ec--chunk-in-fold-p (chunk)
+  "Non-nil if any of the proof CHUNK's spans lies inside a fold overlay.
+Probes `proof-start-span-end' and the start of every body item, so a
+fold that doesn't quite cover the start position still wins as long as
+it covers any body command."
+  (let ((cmds-rev (nth 1 chunk))
+        (start-end (nth 3 chunk)))
+    (or (pg-ec--position-in-fold-p start-end)
+        (cl-some
+         (lambda (item)
+           (let ((sp (car item)))
+             (and sp (overlayp sp) (overlay-buffer sp)
+                  (pg-ec--position-in-fold-p (overlay-start sp)))))
+         cmds-rev))))
+
+(defun pg-ec--buffer-has-folds-p ()
+  (cl-some (lambda (ov) (overlay-get ov 'pg-ec-fold))
+           (overlays-in (point-min) (point-max))))
+
 (defun pg-ec--omit-filter-gate (chunks)
-  "Demote `proof' chunks whose lemma is not inside a fold to `no-proof'.
+  "Demote `proof' chunks not inside a fold to `no-proof'.
 Run as `:filter-return' advice on `proof-script-omit-filter'.
 Active only in `easycrypt-mode' buffers when `pg-ec-folding-omit-proofs'
 is non-nil."
@@ -706,18 +725,30 @@ is non-nil."
        (lambda (chunk)
          (cond
           ((eq (car chunk) 'proof)
-           ;; chunk = ('proof cmds-rev start-span-start start-span-end)
-           (let ((proof-start-end (nth 3 chunk)))
-             (if (pg-ec--position-in-fold-p proof-start-end)
-                 chunk
-               (list 'no-proof (nth 1 chunk)))))
+           (if (pg-ec--chunk-in-fold-p chunk)
+               chunk
+             (list 'no-proof (nth 1 chunk))))
           (t chunk)))
        chunks)
     chunks))
 
+(defun pg-ec--force-omit-around (orig-fn &rest args)
+  "Force `proof-omit-proofs-option' on around ORIG-FN when this buffer
+has folds.  Belt-and-braces: even if the buffer-local enable hook
+didn't run or its value got clobbered, the omit framework will still
+kick in whenever something is folded."
+  (if (and pg-ec-folding-omit-proofs
+           (derived-mode-p 'easycrypt-mode)
+           (pg-ec--buffer-has-folds-p))
+      (let ((proof-omit-proofs-option t))
+        (apply orig-fn args))
+    (apply orig-fn args)))
+
 (with-eval-after-load 'proof-script
   (advice-add 'proof-script-omit-filter
-              :filter-return #'pg-ec--omit-filter-gate))
+              :filter-return #'pg-ec--omit-filter-gate)
+  (advice-add 'proof-assert-semis
+              :around #'pg-ec--force-omit-around))
 
 (defun pg-ec-folding--enable-omit ()
   "Buffer-local: keep `proof-omit-proofs-option' on so the gate runs."
@@ -746,6 +777,8 @@ is non-nil."
                         proof-omit-proofs-configured))
          (advised  (advice-member-p #'pg-ec--omit-filter-gate
                                     'proof-script-omit-filter))
+         (forced   (advice-member-p #'pg-ec--force-omit-around
+                                    'proof-assert-semis))
          (start-re (and (boundp 'proof-script-proof-start-regexp)
                         proof-script-proof-start-regexp))
          (end-re   (and (boundp 'proof-script-proof-end-regexp)
@@ -780,6 +813,7 @@ is non-nil."
                          " (buffer-local)" "")))
       (princ (format "proof-omit-proofs-configured: %s\n" omit-cfg))
       (princ (format "filter advice installed:      %s\n" (and advised t)))
+      (princ (format "force-omit advice installed:  %s\n" (and forced t)))
       (princ (format "proof-start regexp:           %s\n" start-re))
       (princ (format "proof-end regexp:             %s\n" end-re))
       (princ (format "admit command:                %s\n" admit))
