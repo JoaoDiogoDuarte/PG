@@ -198,20 +198,33 @@ Returns nil if no terminator is found."
   "End of the line containing POS."
   (save-excursion (goto-char pos) (line-end-position)))
 
+(defun pg-ec--close-block (stack kind match-pred mend)
+  "Close a block on STACK whose entry satisfies MATCH-PRED.
+Returns (NEW-STACK . MAYBE-REGION).  Skips mismatched same-kind
+entries above the match (error recovery for malformed nesting)."
+  (let ((idx (cl-position-if match-pred stack)))
+    (if idx
+        (let ((open (nth idx stack)))
+          (cons (nthcdr (1+ idx) stack)
+                (pg-ec--region kind (nth 1 open)
+                               (nth 2 open) (nth 3 open) mend)))
+      (cons stack nil))))
+
 (defun pg-ec--scan-regions ()
   "Collect all foldable regions in the current buffer.
 Returns a list of regions (see `pg-ec--region').  Malformed or
-unmatched theory/section blocks are dropped."
+unmatched theory/section blocks are dropped individually; a
+malformed block does not prevent surrounding well-formed blocks
+from being registered."
   (let ((regions '())
-        (stack '())) ; items: (KIND NAME BEG HEADER-END)
+        (sec-stack '())   ; items: (section NAME BEG HEADER-END)
+        (thy-stack '()))  ; items: (theory  NAME BEG HEADER-END)
     (save-excursion
       (goto-char (point-min))
       (while (re-search-forward pg-ec--re-fold-any nil t)
         (let ((mb (match-beginning 0)))
           (goto-char mb)
           (cond
-           ;; Comment (always, even inside other comments it's already skipped
-           ;; by syntax-ppss? No — top-level scan hits outer comment first).
            ((looking-at pg-ec--re-comment-open)
             (let ((end (pg-ec--skip-comment mb)))
               (if end
@@ -221,45 +234,43 @@ unmatched theory/section blocks are dropped."
                           regions)
                     (goto-char end))
                 (goto-char (point-max)))))
-           ;; Skip anything inside comment/string.
            ((pg-ec--in-comment-or-string-p mb)
             (forward-char 1))
-           ;; `end section [NAME].' — close innermost section.
+           ;; `end section [NAME].' — close innermost matching section.
            ((looking-at pg-ec--re-section-close)
             (let* ((cname (match-string-no-properties 1))
                    (mend  (match-end 0))
-                   (top   (car stack)))
-              (when (and top (eq (nth 0 top) 'section))
-                (let ((oname (nth 1 top))
-                      (obeg  (nth 2 top))
-                      (ohend (nth 3 top)))
-                  (when (or (null oname) (null cname) (string= oname cname))
-                    (push (pg-ec--region 'section oname obeg ohend mend) regions)
-                    (pop stack))))
+                   (res   (pg-ec--close-block
+                           sec-stack 'section
+                           (lambda (o)
+                             (or (null (nth 1 o)) (null cname)
+                                 (string= (nth 1 o) cname)))
+                           mend)))
+              (setq sec-stack (car res))
+              (when (cdr res) (push (cdr res) regions))
               (goto-char mend)))
            ;; `section [NAME].' — open a section.
            ((looking-at pg-ec--re-section-open)
             (let ((name (match-string-no-properties 1))
                   (mend (match-end 0)))
-              (push (list 'section name mb (pg-ec--header-end-at mb)) stack)
+              (push (list 'section name mb (pg-ec--header-end-at mb)) sec-stack)
               (goto-char mend)))
-           ;; `end NAME.' — close innermost theory (must match name).
+           ;; `end NAME.' — close innermost matching theory.
            ((looking-at pg-ec--re-theory-close)
             (let* ((cname (match-string-no-properties 1))
                    (mend  (match-end 0))
-                   (top   (car stack)))
-              (when (and top (eq (nth 0 top) 'theory)
-                         (string= (nth 1 top) cname))
-                (push (pg-ec--region 'theory cname
-                                     (nth 2 top) (nth 3 top) mend)
-                      regions)
-                (pop stack))
+                   (res   (pg-ec--close-block
+                           thy-stack 'theory
+                           (lambda (o) (string= (nth 1 o) cname))
+                           mend)))
+              (setq thy-stack (car res))
+              (when (cdr res) (push (cdr res) regions))
               (goto-char mend)))
            ;; `theory NAME.' — open a theory.
            ((looking-at pg-ec--re-theory-open)
             (let ((name (match-string-no-properties 1))
                   (mend (match-end 0)))
-              (push (list 'theory name mb (pg-ec--header-end-at mb)) stack)
+              (push (list 'theory name mb (pg-ec--header-end-at mb)) thy-stack)
               (goto-char mend)))
            ;; Proof closers outside any proof — ignore (consumed by proof scans).
            ((looking-at pg-ec--re-proof-end)
@@ -335,9 +346,12 @@ unmatched theory/section blocks are dropped."
   (cl-find-if (lambda (ov) (overlay-get ov 'pg-ec-fold))
               (overlays-at pos)))
 
-(defun pg-ec--overlay-in-range (beg end)
-  (cl-find-if (lambda (ov) (overlay-get ov 'pg-ec-fold))
-              (overlays-in beg end)))
+(defun pg-ec--fold-overlay-starting-at (beg)
+  "Return a pg-ec fold overlay whose start is exactly BEG, or nil."
+  (cl-find-if (lambda (ov)
+                (and (overlay-get ov 'pg-ec-fold)
+                     (= (overlay-start ov) beg)))
+              (overlays-in beg (1+ beg))))
 
 (defun pg-ec--modification-guard (ov after-p _beg _end &optional _len)
   (unless after-p
@@ -367,6 +381,8 @@ unmatched theory/section blocks are dropped."
     (overlay-put ov 'insert-behind-hooks   '(pg-ec--modification-guard))
     (overlay-put ov 'help-echo
                  (format "Folded EasyCrypt %s. C-c w to unfold." label))
+    (when (memq kind '(section theory))
+      (add-hook 'after-change-functions #'pg-ec--after-change nil t))
     ov))
 
 (defun pg-ec--unfold-overlay (ov)
@@ -374,6 +390,108 @@ unmatched theory/section blocks are dropped."
   (delete-overlay ov))
 
 (add-to-invisibility-spec '(pg-ec-fold . t))
+
+;; --------------------------------------------------------------------
+;; Header→footer name synchronisation for folded sections/theories
+;; --------------------------------------------------------------------
+
+(defun pg-ec--parse-open-line (header-end)
+  "If the line ending at HEADER-END is a valid section/theory open,
+return (KIND . NAME); otherwise nil."
+  (save-excursion
+    (goto-char header-end)
+    (beginning-of-line)
+    (cond
+     ((looking-at pg-ec--re-section-open)
+      (cons 'section (match-string-no-properties 1)))
+     ((looking-at pg-ec--re-theory-open)
+      (cons 'theory (match-string-no-properties 1))))))
+
+(defun pg-ec--refresh-fold-labels (ov kind name)
+  (let ((label (pg-ec--label kind name)))
+    (overlay-put ov 'pg-ec-name name)
+    (overlay-put ov 'before-string
+                 (propertize (concat " " label " ") 'face 'pg-ec-folded-face))
+    (overlay-put ov 'display
+                 (propertize (concat " " label) 'face 'pg-ec-folded-face))
+    (overlay-put ov 'help-echo
+                 (format "Folded EasyCrypt %s. C-c w to unfold." label))))
+
+(defun pg-ec--rewrite-closer (ov kind new-name)
+  "Find the matching closer inside fold overlay OV and rewrite its name.
+Returns non-nil on success."
+  (let* ((ov-beg (overlay-start ov))
+         (ov-end (overlay-end ov))
+         (closer-re (if (eq kind 'section)
+                        pg-ec--re-section-close
+                      pg-ec--re-theory-close))
+         (inhibit-modification-hooks t))
+    (overlay-put ov 'pg-ec-unfolding t)
+    (unwind-protect
+        (save-excursion
+          (goto-char ov-beg)
+          (let ((found nil) (depth 0))
+            ;; Walk to the matching closer at depth 0, accounting for nested
+            ;; same-kind opens.
+            (let ((open-re (if (eq kind 'section)
+                               pg-ec--re-section-open
+                             pg-ec--re-theory-open)))
+              (while (and (not found)
+                          (re-search-forward
+                           (concat "\\(?:" closer-re "\\)\\|\\(?:" open-re "\\)")
+                           ov-end t))
+                (let ((mb (match-beginning 0)))
+                  (unless (pg-ec--in-comment-or-string-p mb)
+                    (save-excursion
+                      (goto-char mb)
+                      (cond
+                       ((looking-at closer-re)
+                        (if (zerop depth)
+                            (setq found (cons (match-beginning 0)
+                                              (match-end 0)))
+                          (setq depth (1- depth))))
+                       ((looking-at open-re)
+                        (setq depth (1+ depth)))))))))
+            (when found
+              (let* ((cb (car found)) (ce (cdr found))
+                     (replacement
+                      (if (eq kind 'section)
+                          (if new-name (format "end section %s." new-name)
+                            "end section.")
+                        (when new-name (format "end %s." new-name)))))
+                (when replacement
+                  (goto-char cb)
+                  (delete-region cb ce)
+                  (insert replacement)
+                  t)))))
+      (overlay-put ov 'pg-ec-unfolding nil))))
+
+(defun pg-ec--sync-fold-name (ov)
+  "If OV is a folded section/theory and its header name has changed,
+update the overlay labels and rewrite the matching closer."
+  (let* ((kind (overlay-get ov 'pg-ec-kind))
+         (old  (overlay-get ov 'pg-ec-name))
+         (parsed (pg-ec--parse-open-line (overlay-start ov))))
+    (when (and parsed (eq (car parsed) kind))
+      (let ((new (cdr parsed)))
+        (unless (equal old new)
+          ;; Theories must have a name; abandon sync if user cleared it.
+          (unless (and (eq kind 'theory) (null new))
+            (when (pg-ec--rewrite-closer ov kind new)
+              (pg-ec--refresh-fold-labels ov kind new))))))))
+
+(defun pg-ec--after-change (beg end _len)
+  "Buffer-local hook that propagates header renames into folded closers."
+  (dolist (ov (overlays-in (point-min) (point-max)))
+    (when (and (overlay-get ov 'pg-ec-fold)
+               (memq (overlay-get ov 'pg-ec-kind) '(section theory))
+               (not (overlay-get ov 'pg-ec-unfolding)))
+      (let* ((hdr-eol (overlay-start ov))
+             (hdr-bol (save-excursion
+                        (goto-char hdr-eol)
+                        (line-beginning-position))))
+        (when (and (<= beg hdr-eol) (>= end hdr-bol))
+          (pg-ec--sync-fold-name ov))))))
 
 ;; --------------------------------------------------------------------
 ;; Command
@@ -400,7 +518,7 @@ invocation anywhere on a folded region's header line unfolds it."
               (user-error "No foldable EasyCrypt region at point"))
             (let* ((ov-beg (pg-ec--r-hend r))
                    (ov-end (pg-ec--r-end r))
-                   (dup (pg-ec--overlay-in-range ov-beg ov-end)))
+                   (dup (pg-ec--fold-overlay-starting-at ov-beg)))
               (if dup
                   (progn
                     (pg-ec--unfold-overlay dup)
