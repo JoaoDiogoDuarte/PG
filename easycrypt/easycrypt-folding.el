@@ -34,6 +34,14 @@
   "Structural folding for Proof General EasyCrypt mode."
   :group 'easycrypt)
 
+(defcustom pg-ec-folding-persist t
+  "If non-nil, save and restore fold state per file across sessions."
+  :type 'boolean :group 'pg-ec-folding)
+
+(defcustom pg-ec-folding-omit-proofs t
+  "If non-nil, send `admitted.' to EasyCrypt for proofs inside a fold."
+  :type 'boolean :group 'pg-ec-folding)
+
 (defface pg-ec-folded-face
   '((t :inherit shadow :box t))
   "Face for the ellipsis marker of folded EasyCrypt regions.")
@@ -512,34 +520,33 @@ invocation anywhere on a folded region's header line unfolds it."
           (pg-ec--unfold-overlay existing)
           (message "EasyCrypt region unfolded"))
       (condition-case err
-          (let* ((regions (pg-ec--scan-regions))
-                 (r (pg-ec--region-at-point-or-line regions)))
-            (unless r
-              (user-error "No foldable EasyCrypt region at point"))
-            (let* ((ov-beg (pg-ec--r-hend r))
-                   (ov-end (pg-ec--r-end r))
-                   (dup (pg-ec--fold-overlay-starting-at ov-beg)))
-              (if dup
-                  (progn
-                    (pg-ec--unfold-overlay dup)
-                    (message "EasyCrypt region unfolded"))
-                (pg-ec--make-fold-overlay ov-beg ov-end
-                                          (pg-ec--r-kind r)
-                                          (pg-ec--r-name r))
-                (goto-char (pg-ec--r-beg r))
-                (message "EasyCrypt %s folded"
-                         (pg-ec--label (pg-ec--r-kind r)
-                                       (pg-ec--r-name r))))))
+          (progn
+            (let* ((regions (pg-ec--scan-regions))
+                   (r (pg-ec--region-at-point-or-line regions)))
+              (unless r
+                (user-error "No foldable EasyCrypt region at point"))
+              (let* ((ov-beg (pg-ec--r-hend r))
+                     (ov-end (pg-ec--r-end r))
+                     (dup (pg-ec--fold-overlay-starting-at ov-beg)))
+                (if dup
+                    (progn
+                      (pg-ec--unfold-overlay dup)
+                      (message "EasyCrypt region unfolded"))
+                  (pg-ec--make-fold-overlay ov-beg ov-end
+                                            (pg-ec--r-kind r)
+                                            (pg-ec--r-name r))
+                  (goto-char (pg-ec--r-beg r))
+                  (message "EasyCrypt %s folded"
+                           (pg-ec--label (pg-ec--r-kind r)
+                                         (pg-ec--r-name r))))))
+            (when pg-ec-folding-persist
+              (pg-ec-folding-save-state)))
         (error
          (user-error "pg-ec-toggle-hiding: %s" (error-message-string err)))))))
 
 ;; --------------------------------------------------------------------
 ;; Persistence (sidecar state files)
 ;; --------------------------------------------------------------------
-
-(defcustom pg-ec-folding-persist t
-  "If non-nil, save and restore fold state per file across sessions."
-  :type 'boolean :group 'pg-ec-folding)
 
 (defcustom pg-ec-folding-state-dir
   (expand-file-name "pg-ec-folding/" user-emacs-directory)
@@ -607,7 +614,10 @@ invocation anywhere on a folded region's header line unfolds it."
   (when pg-ec-folding-persist
     (pg-ec-folding-restore-state)
     (add-hook 'after-save-hook  #'pg-ec-folding-save-state nil t)
-    (add-hook 'kill-buffer-hook #'pg-ec-folding-save-state nil t)))
+    (add-hook 'kill-buffer-hook #'pg-ec-folding-save-state nil t)
+    ;; Also persist on Emacs exit so state survives even when buffers
+    ;; aren't killed individually.
+    (add-hook 'kill-emacs-hook  #'pg-ec-folding-save-state)))
 
 ;; --------------------------------------------------------------------
 ;; Send `admitted.' for folded proofs (selective omit-proofs)
@@ -623,11 +633,6 @@ invocation anywhere on a folded region's header line unfolds it."
 ;;
 ;; This affects only easycrypt-mode buffers and is a no-op when nothing
 ;; is folded.
-
-(defcustom pg-ec-folding-omit-proofs t
-  "If non-nil, send `admitted.' to EasyCrypt for proofs that lie
-inside a `pg-ec-fold' overlay.  Unfolded proofs are unaffected."
-  :type 'boolean :group 'pg-ec-folding)
 
 (defun pg-ec--position-in-fold-p (pos)
   "Non-nil if POS is covered by a `pg-ec-fold' overlay."
@@ -663,6 +668,72 @@ is non-nil."
   "Buffer-local: keep `proof-omit-proofs-option' on so the gate runs."
   (when pg-ec-folding-omit-proofs
     (setq-local proof-omit-proofs-option t)))
+
+;; --------------------------------------------------------------------
+;; Mode integration
+;; --------------------------------------------------------------------
+
+;; --------------------------------------------------------------------
+;; Diagnostics
+;; --------------------------------------------------------------------
+
+;;;###autoload
+(defun pg-ec-folding-debug ()
+  "Show current state of folding, persistence, and omit-proofs."
+  (interactive)
+  (let* ((folds (cl-remove-if-not (lambda (ov) (overlay-get ov 'pg-ec-fold))
+                                  (overlays-in (point-min) (point-max))))
+         (state-file (pg-ec--state-file))
+         (have-state (and state-file (file-exists-p state-file)))
+         (omit-on  (and (boundp 'proof-omit-proofs-option)
+                        proof-omit-proofs-option))
+         (omit-cfg (and (boundp 'proof-omit-proofs-configured)
+                        proof-omit-proofs-configured))
+         (advised  (advice-member-p #'pg-ec--omit-filter-gate
+                                    'proof-script-omit-filter))
+         (start-re (and (boundp 'proof-script-proof-start-regexp)
+                        proof-script-proof-start-regexp))
+         (end-re   (and (boundp 'proof-script-proof-end-regexp)
+                        proof-script-proof-end-regexp))
+         (admit    (and (boundp 'proof-script-proof-admit-command)
+                        proof-script-proof-admit-command)))
+    (with-output-to-temp-buffer "*pg-ec-folding-debug*"
+      (princ (format "Buffer: %s\n" (or buffer-file-name "<no file>")))
+      (princ (format "Major mode: %s\n" major-mode))
+      (princ (format "Fold overlays: %d\n" (length folds)))
+      (dolist (ov folds)
+        (princ (format "  %-8s %-18s lines %d..%d\n"
+                       (symbol-name (overlay-get ov 'pg-ec-kind))
+                       (or (overlay-get ov 'pg-ec-name) "-")
+                       (line-number-at-pos (overlay-start ov))
+                       (line-number-at-pos (overlay-end ov)))))
+      (princ "\n-- persistence --\n")
+      (princ (format "pg-ec-folding-persist: %s\n" pg-ec-folding-persist))
+      (princ (format "state-dir:  %s\n" pg-ec-folding-state-dir))
+      (princ (format "state-file: %s\n" (or state-file "<none>")))
+      (princ (format "exists:     %s\n" have-state))
+      (when have-state
+        (princ "contents:\n")
+        (princ (with-temp-buffer
+                 (insert-file-contents state-file) (buffer-string)))
+        (princ "\n"))
+      (princ "\n-- omit-proofs --\n")
+      (princ (format "pg-ec-folding-omit-proofs:    %s\n"
+                     pg-ec-folding-omit-proofs))
+      (princ (format "proof-omit-proofs-option:     %s%s\n" omit-on
+                     (if (local-variable-p 'proof-omit-proofs-option)
+                         " (buffer-local)" "")))
+      (princ (format "proof-omit-proofs-configured: %s\n" omit-cfg))
+      (princ (format "filter advice installed:      %s\n" (and advised t)))
+      (princ (format "proof-start regexp:           %s\n" start-re))
+      (princ (format "proof-end regexp:             %s\n" end-re))
+      (princ (format "admit command:                %s\n" admit))
+      (when (and (eq major-mode 'easycrypt-mode) (not omit-cfg))
+        (princ "\nWARNING: omit-proofs not configured. easycrypt.el may need reloading.\n"))
+      (when (and (eq major-mode 'easycrypt-mode) omit-cfg (not omit-on))
+        (princ "\nWARNING: omit-proofs configured but not enabled in this buffer.\n"))
+      (when (and folds (not advised))
+        (princ "\nWARNING: advice not installed; folded proofs won't be omitted.\n")))))
 
 ;; --------------------------------------------------------------------
 ;; Mode integration
