@@ -106,18 +106,22 @@ this list are strings."
   ;; Omit-proofs configuration (see `proof-omit-proofs-configured').
   ;; The folding layer (easycrypt-folding.el) selectively activates
   ;; this for proofs whose lemma is inside a `pg-ec-fold' overlay.
-  ;; Anchor proof-start at the lemma-introducing keyword (`proof.' is
-  ;; optional in EC, so anchoring on it would miss bodies that omit it).
-  ;; The omit framework rewrites the body+closer into `admitted.';
-  ;; everything from the end of the lemma command up to the end of
-  ;; `qed.' / `admitted.' / `abort.' is replaced.
+  ;; Anchor proof-start/end at the start of the command string with
+  ;; optional `local'/`nosmt'/`declare' modifiers.  Without the start
+  ;; anchor, tactic commands like `byequiv (...)' or `have ->: phoare
+  ;; [...]' would falsely match the proof-start keyword and trigger
+  ;; spurious "found second proof start" warnings.
   (setq  proof-script-proof-start-regexp
-         "\\_<\\(lemma\\|equiv\\|hoare\\|ehoare\\|phoare\\|realize\\)\\_>"
+         (concat "\\`[ \t\n]*"
+                 "\\(?:\\(?:local\\|nosmt\\|declare\\)[ \t]+\\)*"
+                 "\\_<\\(lemma\\|equiv\\|hoare\\|ehoare\\|phoare\\|realize\\)\\_>")
          proof-script-proof-end-regexp
-         "\\_<\\(qed\\|save\\|admitted\\|abort\\)\\_>"
-         proof-script-definition-end-regexp    "\\_<abort\\_>"
+         "\\`[ \t\n]*\\_<\\(qed\\|save\\|admitted\\|abort\\)\\_>"
+         proof-script-definition-end-regexp
+         "\\`[ \t\n]*\\_<abort\\_>"
          proof-script-proof-admit-command      "admitted."
-         proof-omit-cheating-regexp            "\\_<\\(admitted\\|abort\\)\\_>"
+         proof-omit-cheating-regexp
+         "\\`[ \t\n]*\\_<\\(admitted\\|abort\\)\\_>"
          proof-omit-proofs-configured          t)
   
   (setq  proof-prog-name                       easycrypt-prog-name
