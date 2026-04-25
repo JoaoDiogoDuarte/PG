@@ -63,7 +63,7 @@
   "\\_<\\(qed\\|admitted\\|abort\\)\\_>[ \t]*\\.")
 
 (defconst pg-ec--re-decl-start
-  "\\_<\\(axiom\\|op\\|const\\|clone\\)\\_>")
+  "\\_<\\(axiom\\|op\\|const\\|clone\\|module\\)\\_>")
 
 (defconst pg-ec--re-by "\\_<by\\_>")
 
@@ -533,9 +533,90 @@ invocation anywhere on a folded region's header line unfolds it."
         (error
          (user-error "pg-ec-toggle-hiding: %s" (error-message-string err)))))))
 
+;; --------------------------------------------------------------------
+;; Persistence (sidecar state files)
+;; --------------------------------------------------------------------
+
+(defcustom pg-ec-folding-persist t
+  "If non-nil, save and restore fold state per file across sessions."
+  :type 'boolean :group 'pg-ec-folding)
+
+(defcustom pg-ec-folding-state-dir
+  (expand-file-name "pg-ec-folding/" user-emacs-directory)
+  "Directory holding per-file fold-state sidecar files."
+  :type 'directory :group 'pg-ec-folding)
+
+(defun pg-ec--state-file ()
+  "Path to the sidecar state file for the current buffer, or nil."
+  (when (and pg-ec-folding-persist buffer-file-name)
+    (unless (file-directory-p pg-ec-folding-state-dir)
+      (make-directory pg-ec-folding-state-dir t))
+    (expand-file-name
+     (concat (sha1 (expand-file-name buffer-file-name)) ".el")
+     pg-ec-folding-state-dir)))
+
+(defun pg-ec--collect-fold-lines ()
+  "Return ((HEADER-LINE . END-LINE) ...) for current fold overlays."
+  (let (result)
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when (overlay-get ov 'pg-ec-fold)
+        (push (cons (line-number-at-pos (overlay-start ov))
+                    (line-number-at-pos (overlay-end ov)))
+              result)))
+    (nreverse result)))
+
+(defun pg-ec-folding-save-state ()
+  "Persist this buffer's fold state to its sidecar file."
+  (let ((f (pg-ec--state-file)))
+    (when f
+      (let ((data (pg-ec--collect-fold-lines)))
+        (cond
+         (data
+          (with-temp-file f
+            (let ((print-length nil) (print-level nil))
+              (prin1 data (current-buffer)))))
+         ((file-exists-p f) (delete-file f)))))))
+
+(defun pg-ec-folding-restore-state ()
+  "Re-create fold overlays from this buffer's sidecar file."
+  (let ((f (pg-ec--state-file)))
+    (when (and f (file-exists-p f))
+      (condition-case _err
+          (let ((data (with-temp-buffer
+                        (insert-file-contents f)
+                        (read (current-buffer))))
+                (regions (pg-ec--scan-regions)))
+            (dolist (entry data)
+              (let* ((hdr-line (car entry))
+                     (r (cl-find-if
+                         (lambda (r)
+                           (= hdr-line
+                              (line-number-at-pos (pg-ec--r-hend r))))
+                         regions)))
+                (when r
+                  (let ((ov-beg (pg-ec--r-hend r))
+                        (ov-end (pg-ec--r-end r)))
+                    (unless (pg-ec--fold-overlay-starting-at ov-beg)
+                      (pg-ec--make-fold-overlay ov-beg ov-end
+                                                (pg-ec--r-kind r)
+                                                (pg-ec--r-name r))))))))
+        (error nil)))))
+
+(defun pg-ec-folding--setup ()
+  "Buffer-local setup: restore folds and register save hooks."
+  (when pg-ec-folding-persist
+    (pg-ec-folding-restore-state)
+    (add-hook 'after-save-hook  #'pg-ec-folding-save-state nil t)
+    (add-hook 'kill-buffer-hook #'pg-ec-folding-save-state nil t)))
+
+;; --------------------------------------------------------------------
+;; Mode integration
+;; --------------------------------------------------------------------
+
 (with-eval-after-load 'easycrypt
   (when (boundp 'easycrypt-mode-map)
-    (define-key easycrypt-mode-map (kbd "C-c w") #'pg-ec-toggle-hiding)))
+    (define-key easycrypt-mode-map (kbd "C-c w") #'pg-ec-toggle-hiding))
+  (add-hook 'easycrypt-mode-hook #'pg-ec-folding--setup))
 
 (provide 'easycrypt-folding)
 
