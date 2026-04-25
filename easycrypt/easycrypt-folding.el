@@ -159,6 +159,37 @@ Returns nil if no terminator is found."
            (t (forward-char 1)))))
       found)))
 
+(defun pg-ec--find-decl-body-start (start limit)
+  "Return the position of the first top-level `:' or `=' between START
+and LIMIT, skipping comments, strings, and balanced bracket groups.
+Returns nil if none is found."
+  (save-excursion
+    (goto-char start)
+    (let ((found nil) (paren 0) (brack 0) (brace 0))
+      (while (and (not found) (< (point) limit))
+        (let ((c (char-after)))
+          (cond
+           ((and (eq c ?\() (eq (char-after (1+ (point))) ?*))
+            (let ((e (pg-ec--skip-comment (point))))
+              (if e (goto-char e) (goto-char limit))))
+           ((eq c ?\")
+            (forward-char 1)
+            (while (and (not (eobp)) (not (eq (char-after) ?\")))
+              (when (eq (char-after) ?\\) (forward-char 1))
+              (forward-char 1))
+            (when (eq (char-after) ?\") (forward-char 1)))
+           ((eq c ?\() (setq paren (1+ paren)) (forward-char 1))
+           ((eq c ?\)) (setq paren (max 0 (1- paren))) (forward-char 1))
+           ((eq c ?\[) (setq brack (1+ brack)) (forward-char 1))
+           ((eq c ?\]) (setq brack (max 0 (1- brack))) (forward-char 1))
+           ((eq c ?\{) (setq brace (1+ brace)) (forward-char 1))
+           ((eq c ?\}) (setq brace (max 0 (1- brace))) (forward-char 1))
+           ((and (memq c '(?: ?=))
+                 (= paren 0) (= brack 0) (= brace 0))
+            (setq found (point)))
+           (t (forward-char 1)))))
+      found)))
+
 (defun pg-ec--statement-contains-by-p (start end)
   "Non-nil if the statement in [START, END) contains a top-level `by' keyword."
   (save-excursion
@@ -306,14 +337,21 @@ from being registered."
                       regions)
                 (goto-char fold-end))
               (unless fold-end (forward-char 1))))
-           ;; Leaf declarations: axiom / op / const / clone.
+           ;; Leaf declarations: axiom / op / const / clone / module.
            ((looking-at pg-ec--re-decl-start)
             (let* ((kw (intern (match-string-no-properties 1)))
                    (stmt-end (pg-ec--find-statement-end mb)))
               (when stmt-end
-                (push (pg-ec--region kw nil mb
-                                     (pg-ec--header-end-at mb) stmt-end)
-                      regions)
+                (let ((hend
+                       (cond
+                        ;; For op/const/module fold from the first
+                        ;; top-level `:' or `=' so the signature stays
+                        ;; visible (e.g. `op f (x : t) ' folded).
+                        ((memq kw '(op const module))
+                         (or (pg-ec--find-decl-body-start mb stmt-end)
+                             (pg-ec--header-end-at mb)))
+                        (t (pg-ec--header-end-at mb)))))
+                  (push (pg-ec--region kw nil mb hend stmt-end) regions))
                 (goto-char stmt-end))
               (unless stmt-end (forward-char 1))))
            (t (forward-char 1))))))
