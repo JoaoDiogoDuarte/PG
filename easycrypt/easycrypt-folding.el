@@ -430,28 +430,132 @@ column-wise before the keyword (e.g. inside the leading indent or on
               (symbol-name kind)
               (if name (concat " " name) "")))))
 
-(defun pg-ec--make-fold-overlay (beg end kind name)
-  "Create a fold overlay or return nil if the range is empty."
+(defvar pg-ec--fold-keymap
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "<delete>")     #'pg-ec-delete-fold)
+    (define-key m (kbd "<deletechar>") #'pg-ec-delete-fold)
+    (define-key m (kbd "<backspace>")  #'pg-ec-delete-fold)
+    (define-key m (kbd "DEL")          #'pg-ec-delete-fold)
+    (define-key m (kbd "C-d")          #'pg-ec-delete-fold)
+    (define-key m (kbd "C-k")          #'pg-ec-delete-fold)
+    (define-key m (kbd "TAB")          #'pg-ec-indent-fold)
+    (define-key m (kbd "<tab>")        #'pg-ec-indent-fold)
+    (define-key m (kbd "<backtab>")    #'pg-ec-unindent-fold)
+    (define-key m (kbd "S-<tab>")      #'pg-ec-unindent-fold)
+    m)
+  "Keymap active when point is on a folded EasyCrypt region.
+Delete keys remove the whole folded construct (header + body); TAB
+and back-TAB indent / un-indent every line under the fold.")
+
+(defun pg-ec--make-fold-overlay (beg end kind name &optional region-beg)
+  "Create a fold overlay or return nil if the range is empty.
+REGION-BEG, when given, is the position of the construct's first
+character (e.g. start of `lemma'/`section'/`(*'); used by
+`pg-ec-delete-fold' so deleting the fold removes the whole
+construct including its visible header line."
   (when (< beg end)
     (let ((ov (make-overlay beg end nil t nil))
           (label (pg-ec--label kind name)))
       (overlay-put ov 'pg-ec-fold t)
       (overlay-put ov 'pg-ec-kind kind)
       (overlay-put ov 'pg-ec-name name)
+      (overlay-put ov 'pg-ec-region-beg (or region-beg beg))
       (overlay-put ov 'invisible 'pg-ec-fold)
       (overlay-put ov 'isearch-open-invisible
                    (lambda (o) (pg-ec--unfold-overlay o)))
       (overlay-put ov 'display
                    (propertize label 'face 'pg-ec-folded-face))
+      (overlay-put ov 'keymap pg-ec--fold-keymap)
       (overlay-put ov 'evaporate t)
       (overlay-put ov 'modification-hooks    '(pg-ec--modification-guard))
       (overlay-put ov 'insert-in-front-hooks '(pg-ec--modification-guard))
       (overlay-put ov 'insert-behind-hooks   '(pg-ec--modification-guard))
       (overlay-put ov 'help-echo
-                   (format "Folded EasyCrypt %s. C-c w to unfold." label))
+                   (format "Folded EasyCrypt %s. C-c w to unfold; %s"
+                           label
+                           "DEL deletes, TAB indents."))
       (when (memq kind '(section theory))
         (add-hook 'after-change-functions #'pg-ec--after-change nil t))
       ov)))
+
+(defun pg-ec--current-fold-overlay ()
+  "Return the pg-ec-fold overlay at point, or nil."
+  (cl-find-if (lambda (ov) (overlay-get ov 'pg-ec-fold))
+              (overlays-at (point))))
+
+;;;###autoload
+(defun pg-ec-delete-fold ()
+  "Delete the whole folded construct at point (header + body).
+Bound on fold overlays so `<delete>'/`<backspace>'/`C-k' etc. wipe
+the entire folded region from the buffer in one stroke."
+  (interactive)
+  (let ((ov (pg-ec--current-fold-overlay)))
+    (if (null ov)
+        (user-error "No fold at point")
+      (let* ((reg-beg (or (overlay-get ov 'pg-ec-region-beg)
+                          (overlay-start ov)))
+             (end     (overlay-end ov))
+             (line-beg (save-excursion (goto-char reg-beg)
+                                       (line-beginning-position)))
+             (delete-beg (if (string-match-p
+                              "\\`[ \t]*\\'"
+                              (buffer-substring-no-properties line-beg reg-beg))
+                             line-beg
+                           reg-beg))
+             (delete-end (if (eq (char-after end) ?\n) (1+ end) end))
+             (inhibit-modification-hooks t))
+        (overlay-put ov 'pg-ec-unfolding t)
+        (delete-region delete-beg delete-end)
+        (delete-overlay ov)
+        (when pg-ec-folding-persist (pg-ec-folding-save-state))
+        (message "Folded region deleted")))))
+
+(defun pg-ec--shift-indent (beg end count)
+  "Shift every line in [BEG, END] sideways by COUNT spaces.
+Positive COUNT indents, negative un-indents (up to existing leading
+whitespace).  Iterates manually so it isn't fooled by invisible
+overlays — `indent-rigidly' would otherwise skip lines under a fold."
+  (save-excursion
+    (goto-char beg)
+    (forward-line 0)
+    (while (< (point) end)
+      (cond
+       ((>= count 0)
+        (insert-char ?\s count))
+       (t
+        (let* ((bol (point))
+               (target (+ bol (- count)))
+               (limit (min target end)))
+          (skip-chars-forward " " limit)
+          (delete-region bol (point)))))
+      (forward-line 1))))
+
+(defun pg-ec--indent-fold-by (count)
+  "Indent every line under the fold at point by COUNT columns."
+  (let ((ov (pg-ec--current-fold-overlay)))
+    (if (null ov)
+        (user-error "No fold at point")
+      (let* ((reg-beg (or (overlay-get ov 'pg-ec-region-beg)
+                          (overlay-start ov)))
+             (end (overlay-end ov))
+             (inhibit-modification-hooks t))
+        (overlay-put ov 'pg-ec-unfolding t)
+        (unwind-protect
+            (pg-ec--shift-indent reg-beg end count)
+          (overlay-put ov 'pg-ec-unfolding nil))
+        (when pg-ec-folding-persist (pg-ec-folding-save-state))))))
+
+;;;###autoload
+(defun pg-ec-indent-fold ()
+  "Indent every line under the folded region at point by `tab-width'."
+  (interactive)
+  (pg-ec--indent-fold-by tab-width))
+
+;;;###autoload
+(defun pg-ec-unindent-fold ()
+  "Un-indent every line under the folded region at point by `tab-width'."
+  (interactive)
+  (pg-ec--indent-fold-by (- tab-width)))
 
 (defun pg-ec--unfold-overlay (ov)
   (overlay-put ov 'pg-ec-unfolding t)
@@ -478,10 +582,8 @@ return (KIND . NAME); otherwise nil."
 (defun pg-ec--refresh-fold-labels (ov kind name)
   (let ((label (pg-ec--label kind name)))
     (overlay-put ov 'pg-ec-name name)
-    (overlay-put ov 'before-string
-                 (propertize (concat " " label " ") 'face 'pg-ec-folded-face))
     (overlay-put ov 'display
-                 (propertize (concat " " label) 'face 'pg-ec-folded-face))
+                 (propertize label 'face 'pg-ec-folded-face))
     (overlay-put ov 'help-echo
                  (format "Folded EasyCrypt %s. C-c w to unfold." label))))
 
@@ -607,7 +709,8 @@ Otherwise fold every topmost region whose extent fits inside [BEG, END)."
             (unless (pg-ec--fold-overlay-starting-at ov-beg)
               (pg-ec--make-fold-overlay ov-beg ov-end
                                         (pg-ec--r-kind r)
-                                        (pg-ec--r-name r))
+                                        (pg-ec--r-name r)
+                                        (pg-ec--r-beg r))
               (setq n (1+ n)))))
         (if (zerop n)
             (user-error "No foldable EasyCrypt region inside selection")
@@ -655,7 +758,8 @@ ops, consts, clones, modules, and comments."
                         (message "EasyCrypt region unfolded"))
                     (let ((ov (pg-ec--make-fold-overlay
                                ov-beg ov-end
-                               (pg-ec--r-kind r) (pg-ec--r-name r))))
+                               (pg-ec--r-kind r) (pg-ec--r-name r)
+                               (pg-ec--r-beg r))))
                       (if (null ov)
                           (user-error "Region too small to fold")
                         (goto-char (pg-ec--r-beg r))
@@ -730,7 +834,8 @@ ops, consts, clones, modules, and comments."
                     (unless (pg-ec--fold-overlay-starting-at ov-beg)
                       (pg-ec--make-fold-overlay ov-beg ov-end
                                                 (pg-ec--r-kind r)
-                                                (pg-ec--r-name r))))))))
+                                                (pg-ec--r-name r)
+                                                (pg-ec--r-beg r))))))))
         (error nil)))))
 
 (defun pg-ec-folding--setup ()
