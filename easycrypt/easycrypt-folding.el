@@ -861,6 +861,42 @@ inspected by `pg-ec-folding-debug' to confirm the filter fires.")
 (defvar pg-ec-folding--last-filter-summary nil
   "Most recent classification result summary from `pg-ec--ec-omit-filter'.")
 
+(defun pg-ec--cmd-span-in-fold-p (sp)
+  "Non-nil if SP overlaps with any `pg-ec-fold' overlay."
+  (and sp (overlayp sp) (overlay-buffer sp)
+       (with-current-buffer (overlay-buffer sp)
+         (cl-some (lambda (ov) (overlay-get ov 'pg-ec-fold))
+                  (overlays-in (overlay-start sp) (overlay-end sp))))))
+
+(defun pg-ec--rewrite-oneliner-cmd (cmd)
+  "If CMD is a one-liner self-closing lemma (matches the proof-start
+regexp AND contains a top-level `by'), return a rewritten cmd that
+admits the lemma instead of running its body.  Otherwise nil."
+  (when (and proof-script-proof-start-regexp
+             (string-match proof-script-proof-start-regexp cmd)
+             (string-match "\\_<by\\_>" cmd))
+    (let* ((by-pos (string-match "\\_<by\\_>" cmd))
+           (header (substring cmd 0 by-pos))
+           (trimmed (replace-regexp-in-string "[ \t\n]+\\'" "" header)))
+      (concat trimmed ". admitted."))))
+
+(defun pg-ec--rewrite-folded-oneliners (vanillas)
+  "Walk VANILLAS and rewrite each folded one-liner lemma's qcmd to
+`lemma X : P. admitted.', so single-statement proofs (which the omit
+framework can't compress because they are already a single cmd) still
+get admitted instead of fully run when their lemma is folded."
+  (when (and pg-ec-folding-omit-proofs
+             (derived-mode-p 'easycrypt-mode))
+    (dolist (item vanillas)
+      (let* ((sp (car item))
+             (qcmd (nth 1 item))
+             (cmd (and qcmd (mapconcat #'identity qcmd " "))))
+        (when (and cmd (pg-ec--cmd-span-in-fold-p sp))
+          (let ((new-cmd (pg-ec--rewrite-oneliner-cmd cmd)))
+            (when new-cmd
+              (setcar (cdr item) (list new-cmd))))))))
+  vanillas)
+
 (defun pg-ec--omit-filter-around (orig-fn vanillas)
   "Replace `proof-script-omit-filter' with `pg-ec--ec-omit-filter' in
 EasyCrypt buffers; otherwise fall through."
@@ -890,11 +926,23 @@ kick in whenever something is folded."
         (apply orig-fn args))
     (apply orig-fn args)))
 
+(defun pg-ec--extend-queue-rewrite (args)
+  "Rewrite folded one-liner lemma cmds to `admitted.' just before
+they hit the prover queue."
+  (if (and pg-ec-folding-omit-proofs
+           (derived-mode-p 'easycrypt-mode))
+      (list (car args) (pg-ec--rewrite-folded-oneliners (cadr args)))
+    args))
+
 (with-eval-after-load 'proof-script
   (advice-add 'proof-script-omit-filter
               :around #'pg-ec--omit-filter-around)
   (advice-add 'proof-assert-semis
               :around #'pg-ec--force-omit-around))
+
+(with-eval-after-load 'proof-shell
+  (advice-add 'proof-extend-queue
+              :filter-args #'pg-ec--extend-queue-rewrite))
 
 (defun pg-ec-folding--enable-omit ()
   "Buffer-local: keep `proof-omit-proofs-option' on so the gate runs."
