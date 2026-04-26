@@ -783,23 +783,100 @@ it covers any body command."
   (cl-some (lambda (ov) (overlay-get ov 'pg-ec-fold))
            (overlays-in (point-min) (point-max))))
 
-(defun pg-ec--omit-filter-gate (chunks)
-  "Demote `proof' chunks not inside a fold to `no-proof'.
-Run as `:filter-return' advice on `proof-script-omit-filter'.
-Active only in `easycrypt-mode' buffers when `pg-ec-folding-omit-proofs'
-is non-nil."
+(defun pg-ec--cmd-is-oneliner-proof-p (cmd)
+  "Non-nil if CMD opens AND closes a proof in a single command.
+EasyCrypt's `lemma X : P by tac.' / `lemma X : P by done.' style
+matches the proof-start regexp but never reaches `qed.'/`admitted.'/
+`abort.', so the generic omit-filter would falsely enter inside-proof
+state and warn `found second proof start' on the next real lemma."
+  (and proof-script-proof-start-regexp
+       (string-match proof-script-proof-start-regexp cmd)
+       (string-match "\\_<by\\_>" cmd)))
+
+(defun pg-ec--ec-omit-filter (vanillas)
+  "EasyCrypt-aware replacement for `proof-script-omit-filter'.
+Same chunk format, but:
+  * one-liner self-closing lemmas (`lemma X : P by tac.') stay
+    classified as `no-proof' instead of opening proof state and
+    triggering spurious nested-proof warnings on the next lemma;
+  * the fold gate is integrated: a `proof' chunk whose start span or
+    any body item is not covered by a `pg-ec-fold' overlay is
+    immediately demoted to `no-proof'."
+  (let (result-chunks
+        maybe-result
+        inside-proof
+        proof-start-span-start proof-start-span-end)
+    (dolist (item vanillas)
+      (let* ((qcmd (nth 1 item))
+             (cmd  (and qcmd (mapconcat #'identity qcmd " ")))
+             (is-comment (eq (span-property (car item) 'type) 'comment))
+             (start-match (and cmd proof-script-proof-start-regexp
+                               (string-match
+                                proof-script-proof-start-regexp cmd)))
+             (end-match   (and cmd proof-script-proof-end-regexp
+                               (string-match
+                                proof-script-proof-end-regexp cmd)))
+             (oneliner    (and cmd (pg-ec--cmd-is-oneliner-proof-p cmd))))
+        (cond
+         ((or is-comment (null cmd))
+          (push item maybe-result))
+         (inside-proof
+          (cond
+           (end-match
+            (let* ((chunk-items (cons item maybe-result))
+                   (in-fold
+                    (or (pg-ec--position-in-fold-p proof-start-span-end)
+                        (cl-some
+                         (lambda (it)
+                           (let ((sp (car it)))
+                             (and sp (overlayp sp) (overlay-buffer sp)
+                                  (pg-ec--position-in-fold-p
+                                   (overlay-start sp)))))
+                         chunk-items))))
+              (if (and pg-ec-folding-omit-proofs in-fold)
+                  (push (list 'proof chunk-items
+                              proof-start-span-start proof-start-span-end)
+                        result-chunks)
+                (push (list 'no-proof chunk-items) result-chunks)))
+            (setq maybe-result nil)
+            (setq inside-proof nil))
+           (t (push item maybe-result))))
+         (t
+          (cond
+           ((and start-match (not oneliner))
+            (push (list 'no-proof (cons item maybe-result)) result-chunks)
+            (setq maybe-result nil)
+            (setq proof-start-span-start (span-start (car item)))
+            (setq proof-start-span-end   (span-end   (car item)))
+            (setq inside-proof t))
+           (t (push item maybe-result)))))))
+    (when maybe-result
+      (push (list 'no-proof maybe-result) result-chunks))
+    result-chunks))
+
+(defvar pg-ec-folding--filter-invocations 0
+  "How many times `pg-ec--ec-omit-filter' has run.  Reset never;
+inspected by `pg-ec-folding-debug' to confirm the filter fires.")
+
+(defvar pg-ec-folding--last-filter-summary nil
+  "Most recent classification result summary from `pg-ec--ec-omit-filter'.")
+
+(defun pg-ec--omit-filter-around (orig-fn vanillas)
+  "Replace `proof-script-omit-filter' with `pg-ec--ec-omit-filter' in
+EasyCrypt buffers; otherwise fall through."
   (if (and pg-ec-folding-omit-proofs
            (derived-mode-p 'easycrypt-mode))
-      (mapcar
-       (lambda (chunk)
-         (cond
-          ((eq (car chunk) 'proof)
-           (if (pg-ec--chunk-in-fold-p chunk)
-               chunk
-             (list 'no-proof (nth 1 chunk))))
-          (t chunk)))
-       chunks)
-    chunks))
+      (let ((chunks (pg-ec--ec-omit-filter vanillas)))
+        (cl-incf pg-ec-folding--filter-invocations)
+        (setq pg-ec-folding--last-filter-summary
+              (mapcar (lambda (c)
+                        (cons (car c)
+                              (if (eq (car c) 'proof)
+                                  (length (nth 1 c))
+                                (length (nth 1 c)))))
+                      chunks))
+        chunks)
+    (funcall orig-fn vanillas)))
 
 (defun pg-ec--force-omit-around (orig-fn &rest args)
   "Force `proof-omit-proofs-option' on around ORIG-FN when this buffer
@@ -815,7 +892,7 @@ kick in whenever something is folded."
 
 (with-eval-after-load 'proof-script
   (advice-add 'proof-script-omit-filter
-              :filter-return #'pg-ec--omit-filter-gate)
+              :around #'pg-ec--omit-filter-around)
   (advice-add 'proof-assert-semis
               :around #'pg-ec--force-omit-around))
 
@@ -844,7 +921,7 @@ kick in whenever something is folded."
                         proof-omit-proofs-option))
          (omit-cfg (and (boundp 'proof-omit-proofs-configured)
                         proof-omit-proofs-configured))
-         (advised  (advice-member-p #'pg-ec--omit-filter-gate
+         (advised  (advice-member-p #'pg-ec--omit-filter-around
                                     'proof-script-omit-filter))
          (forced   (advice-member-p #'pg-ec--force-omit-around
                                     'proof-assert-semis))
@@ -883,6 +960,11 @@ kick in whenever something is folded."
       (princ (format "proof-omit-proofs-configured: %s\n" omit-cfg))
       (princ (format "filter advice installed:      %s\n" (and advised t)))
       (princ (format "force-omit advice installed:  %s\n" (and forced t)))
+      (princ (format "filter invocations so far:    %d\n"
+                     pg-ec-folding--filter-invocations))
+      (when pg-ec-folding--last-filter-summary
+        (princ (format "last filter chunks:           %S\n"
+                       pg-ec-folding--last-filter-summary)))
       (princ (format "proof-start regexp:           %s\n" start-re))
       (princ (format "proof-end regexp:             %s\n" end-re))
       (princ (format "admit command:                %s\n" admit))
