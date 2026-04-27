@@ -974,29 +974,26 @@ inspected by `pg-ec-folding-debug' to confirm the filter fires.")
                   (overlays-in (overlay-start sp) (overlay-end sp))))))
 
 (defun pg-ec--rewrite-oneliner-cmd (cmd)
-  "If CMD is a one-liner self-closing lemma (`lemma X : P by tac.'),
-return a rewritten cmd of the form `axiom X : P.' so the rewrite
-produces exactly ONE EasyCrypt command per PG span (preserving PG's
-span/state bookkeeping for retract).  Returns nil for non-lemma
-proof starts (equiv/hoare/ehoare/phoare/realize) since EasyCrypt's
-`axiom' takes propositions only — those fall back to the slow path."
-  (when (string-match
-         (concat "\\`[ \t\n]*"
-                 "\\(?:\\(?:local\\|nosmt\\|declare\\)[ \t]+\\)*"
-                 "\\(\\_<lemma\\_>\\)")
-         cmd)
-    (let ((lemma-pos (match-beginning 1))
-          (lemma-end (match-end 1)))
-      (when (string-match "\\_<by\\_>" cmd)
-        (let* ((by-pos    (match-beginning 0))
-               (prefix    (substring cmd 0 lemma-pos))
-               (sig       (substring cmd lemma-end by-pos))
-               (sig-trim  (replace-regexp-in-string "[ \t\n]+\\'" "" sig))
-               ;; Strip `nosmt' (SMT proof hint — meaningless for axioms);
-               ;; keep `local'/`declare' which apply to axioms too.
-               (clean-prefix
-                (replace-regexp-in-string "\\_<nosmt\\_>[ \t\n]+" "" prefix)))
-          (concat clean-prefix "axiom" sig-trim "."))))))
+  "If CMD is a one-liner self-closing proof (`lemma'/`equiv'/`hoare'/
+`ehoare'/`phoare'/`realize' with a `by tac.' shorthand), return a
+rewritten cmd that keeps the lemma header but replaces the tactic
+chain with `admit'.  For example:
+
+  local lemma X : P by tac1;tac2.  ==>  local lemma X : P by admit.
+
+This keeps exactly ONE EasyCrypt command per PG span (the rewritten
+cmd is still terminated by a single `.'), preserves the original
+declaration kind and modifiers (`local'/`nosmt'/`declare'), avoids
+EC's `global axiom in section' warnings, and works uniformly for
+`equiv'/`hoare'/`phoare' one-liners since `by admit' admits any
+proof goal."
+  (when (and proof-script-proof-start-regexp
+             (string-match proof-script-proof-start-regexp cmd)
+             (string-match "\\_<by\\_>" cmd))
+    (let* ((by-pos      (string-match "\\_<by\\_>" cmd))
+           (header      (substring cmd 0 by-pos))
+           (header-trim (replace-regexp-in-string "[ \t\n]+\\'" "" header)))
+      (concat header-trim " by admit."))))
 
 (defun pg-ec--rewrite-folded-oneliners (vanillas)
   "Walk VANILLAS and rewrite each folded one-liner lemma's qcmd to
